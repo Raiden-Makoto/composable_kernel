@@ -260,7 +260,8 @@ struct ThreadGroupTensorSliceTransfer_Gather_DirectLoad
             // src_coord_xor_.GetIndex().At(I0) =
             //     src_coord_.GetIndex().At(I0) ^ ((threadIdx.x % 64) / 8);
             Index new_index = src_coord_.GetIndex();
-            new_index(I0)   = src_coord_.GetIndex().At(I0) ^ ((threadIdx.x % 64) / 8);
+            new_index(I0)   = src_coord_.GetIndex().At(I0) ^
+                            ((threadIdx.x / block_slice_lengths.At(I0)) % block_slice_lengths.At(I0));
             src_coord_xor_  = make_tensor_coordinate(src_desc, new_index);
 
             const IndexType src_offset = src_coord_xor_.GetOffset() + gather_offset;
