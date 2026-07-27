@@ -395,9 +395,6 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
         StaticallyIndexedArray<decltype(b_scale_thread_buf), Number<2>{}> b_scale_thread_bufs;
         StaticallyIndexedArray<decltype(b_scale_thread_buf_up), Number<2>{}> b_scale_thread_bufs_up;
 
-        const auto b_block_coord_step =
-            make_tensor_coordinate_step(b_grid_desc, b_block_copy_step);
-
         // Global prefetch 1
         a_blockwise_copy.Run(a_grid_desc, a_grid_buf, a_block_desc, a_block_bufs(I0));
         b_blockwise_copy.Run(
@@ -406,8 +403,8 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
             b_grid_desc, b_grid_buf_up, b_block_desc, b_block_origin_idx, b_thread_bufs_up(I0));
 
         a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
-        b_blockwise_copy.MoveSrcSliceWindowWithPrecomputedStep(b_grid_desc, b_block_coord_step);
-        b_blockwise_copy_up.MoveSrcSliceWindowWithPrecomputedStep(b_grid_desc, b_block_coord_step);
+        b_blockwise_copy.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
+        b_blockwise_copy_up.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
 
         // Prefetch a_scales
         static_for<0, MRepeat / MXdlPack, 1>{}([&](auto m0) {
@@ -590,10 +587,8 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                         make_multi_index(-NWaves * NRepeat / NXdlPack, KRepeat / KXdlPack, 0));
 
                     // a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
-                    b_blockwise_copy.MoveSrcSliceWindowWithPrecomputedStep(b_grid_desc,
-                                                                           b_block_coord_step);
-                    b_blockwise_copy_up.MoveSrcSliceWindowWithPrecomputedStep(b_grid_desc,
-                                                                              b_block_coord_step);
+                    b_blockwise_copy.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
+                    b_blockwise_copy_up.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
 
                     static_for<0, MRepeat, 1>{}([&](auto m0) {
                         constexpr auto im_major = m0 / MXdlPack;
