@@ -1650,7 +1650,10 @@ struct GridwiseMoeGemmMX_BPreshuffle
                                             }
                                             gate =
                                                 gate *
-                                                math::__ocml_native_recip_f32(1.0f + math::exp(-gate));
+                                                math::__ocml_native_recip_f32(
+                                                    1.0f +
+                                                    __builtin_amdgcn_exp2f(
+                                                        -1.4426950408889634f * gate));
                                             c_thread_buf_fp32(cidx) = gate * up;
                                         }
                                         else if(ActivationOperation == Activation::gelu_and_mul)
@@ -2149,7 +2152,10 @@ struct GridwiseMoeGemmMX_BPreshuffle
                                             }
                                             gate =
                                                 gate *
-                                                math::__ocml_native_recip_f32(1.0f + math::exp(-gate));
+                                                math::__ocml_native_recip_f32(
+                                                    1.0f +
+                                                    __builtin_amdgcn_exp2f(
+                                                        -1.4426950408889634f * gate));
                                             c_thread_buf_fp32(cidx) = gate * up;
                                         }
                                         else if(ActivationOperation == Activation::gelu_and_mul)
