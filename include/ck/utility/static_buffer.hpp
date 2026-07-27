@@ -75,6 +75,7 @@ template <AddressSpaceEnum AddressSpace,
 struct StaticBufferTupleOfVector
     : public StaticallyIndexedArray<vector_type<S, ScalarPerVector>, NumOfVector>
 {
+    using type = S;
     using V    = typename vector_type<S, ScalarPerVector>::type;
     using base = StaticallyIndexedArray<vector_type<S, ScalarPerVector>, NumOfVector>;
 
