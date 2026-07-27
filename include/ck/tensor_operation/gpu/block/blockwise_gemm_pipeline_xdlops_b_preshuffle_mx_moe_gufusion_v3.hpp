@@ -672,7 +672,18 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                                 b_thread_vec_up.template AsType<mfma_input_type_b>(),
                                 b_scale_thread_vec_up.template AsType<mfma_scale_input_type_b>(),
                                 c_thread_buf_up.GetVectorTypeReference(Number<c_offset>{}));
+
+                            if constexpr(k0.value == 0 && n0.value == 0)
+                            {
+                                __builtin_amdgcn_sched_barrier(0);
+                                __builtin_amdgcn_s_setprio(1);
+                                __builtin_amdgcn_sched_barrier(0);
+                            }
                         });
+
+                        __builtin_amdgcn_sched_barrier(0);
+                        __builtin_amdgcn_s_setprio(0);
+                        __builtin_amdgcn_sched_barrier(0);
 
                         if constexpr(m0.value == SwitchM)
                         {
