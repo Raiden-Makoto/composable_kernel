@@ -275,6 +275,8 @@ struct ThreadwiseTensorSliceTransfer_v2
         src_coord_ = make_tensor_coordinate(src_desc, src_slice_origin_idx);
     }
 
+    __device__ auto GetSrcOffset() const { return src_coord_.GetOffset() / PackedSize; }
+
     template <typename SrcBuffer, typename DstBuffer, typename DstSliceOriginIdx>
     __device__ void Run(const SrcDesc& src_desc,
                         const SrcBuffer& src_buf,
