@@ -203,8 +203,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
         const auto wave_idx     = GetWaveIdx();
         const auto xdlops_a_idx = xdlops_gemm.CalculateAThreadOriginDataIndex();
 
-        return make_tuple(
-            I0, wave_idx[I0], I0, xdlops_a_idx[I1], I0, xdlops_a_idx[I0], I0);
+        return make_tuple(0, wave_idx[I0], 0, xdlops_a_idx[I1], 0, xdlops_a_idx[I0], 0);
     }
 
     static constexpr auto num_buffer_load_a_scale = MRepeat / MXdlPack * KRepeat / KXdlPack;
