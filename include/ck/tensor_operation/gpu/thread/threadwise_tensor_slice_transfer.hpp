@@ -403,6 +403,18 @@ struct ThreadwiseTensorSliceTransfer_v2
         move_tensor_coordinate(src_desc, src_coord_, adjusted_step);
     }
 
+    // Use when the same compile-time slice step is repeated in a hot loop.
+    // Hoisting make_tensor_coordinate_step() lets callers reuse its transformed
+    // hidden-index delta instead of rebuilding it for every window move.
+    __device__ void MoveSrcSliceWindowWithPrecomputedStep(
+        const SrcDesc& src_desc, const SrcCoordStep& src_slice_origin_step)
+    {
+        static_assert(SrcResetCoordinateAfterRun,
+                      "precomputed window stepping requires reset-after-run transfers");
+
+        move_tensor_coordinate(src_desc, src_coord_, src_slice_origin_step);
+    }
+
     // src_slice_origin_step_idx need to be known at compile-time, for performance reason
     template <typename SrcMoveSliceWindowStepHack>
     __device__ void
