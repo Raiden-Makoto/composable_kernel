@@ -360,12 +360,24 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
         index_t num_loop) const
     {
         ignore            = b_block_bufs;
-        auto a_thread_buf = make_static_buffer<AddressSpaceEnum::Vgpr, ComputeTypeA>(
-            a_thread_desc_.GetElementSpaceSize());
-        auto b_thread_buf = make_static_buffer<AddressSpaceEnum::Vgpr, ComputeTypeB>(
-            b_thread_desc_.GetElementSpaceSize());
-        auto b_thread_buf_up = make_static_buffer<AddressSpaceEnum::Vgpr, ComputeTypeB>(
-            b_thread_desc_.GetElementSpaceSize());
+        StaticBufferTupleOfVector<AddressSpaceEnum::Vgpr,
+                                  ComputeTypeA,
+                                  a_thread_desc_.GetElementSpaceSize() / KPack,
+                                  KPack,
+                                  true>
+            a_thread_buf;
+        StaticBufferTupleOfVector<AddressSpaceEnum::Vgpr,
+                                  ComputeTypeB,
+                                  b_thread_desc_.GetElementSpaceSize() / KPack,
+                                  KPack,
+                                  true>
+            b_thread_buf;
+        StaticBufferTupleOfVector<AddressSpaceEnum::Vgpr,
+                                  ComputeTypeB,
+                                  b_thread_desc_.GetElementSpaceSize() / KPack,
+                                  KPack,
+                                  true>
+            b_thread_buf_up;
 
         StaticallyIndexedArray<decltype(b_thread_buf), Number<2>{}> b_thread_bufs;
         StaticallyIndexedArray<decltype(b_thread_buf_up), Number<2>{}> b_thread_bufs_up;
@@ -622,23 +634,18 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                                         scale_comp_buf)[Number<b_scale_offset + s>{}];
                             });
 
-                            vector_type<ComputeTypeA, KPack> a_thread_vec;
-                            vector_type<ComputeTypeB, KPack> b_thread_vec;
-                            vector_type<ComputeTypeB, KPack> b_thread_vec_up;
-
-                            static_for<0, KPack, 1>{}([&](auto ik) {
-                                a_thread_vec.template AsType<ComputeTypeA>()(ik) =
-                                    a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                        make_tuple(I0, I0, im_minor, k0, ik))>{}];
-                                b_thread_vec.template AsType<ComputeTypeB>()(ik) =
-                                    b_thread_bufs[scale_comp_buf]
-                                                 [Number<b_thread_desc_.CalculateOffset(make_tuple(
-                                                     in_major, I0, in_minor, k0, ik))>{}];
-                                b_thread_vec_up.template AsType<ComputeTypeB>()(ik) =
-                                    b_thread_bufs_up
-                                        [scale_comp_buf][Number<b_thread_desc_.CalculateOffset(
-                                            make_tuple(in_major, I0, in_minor, k0, ik))>{}];
-                            });
+                            constexpr auto a_thread_offset = a_thread_desc_.CalculateOffset(
+                                make_tuple(I0, I0, im_minor, k0, I0));
+                            constexpr auto b_thread_offset = b_thread_desc_.CalculateOffset(
+                                make_tuple(in_major, I0, in_minor, k0, I0));
+                            const auto& a_thread_vec =
+                                a_thread_buf.GetVectorTypeReference(Number<a_thread_offset>{});
+                            const auto& b_thread_vec =
+                                b_thread_bufs[scale_comp_buf].GetVectorTypeReference(
+                                    Number<b_thread_offset>{});
+                            const auto& b_thread_vec_up =
+                                b_thread_bufs_up[scale_comp_buf].GetVectorTypeReference(
+                                    Number<b_thread_offset>{});
 
                             using mfma_input_type_a =
                                 typename vector_type<ComputeTypeA,
@@ -839,21 +846,16 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                             b_scale_thread_bufs_up(I0)[Number<b_scale_offset + s>{}];
                     });
 
-                    vector_type<ComputeTypeA, KPack> a_thread_vec;
-                    vector_type<ComputeTypeB, KPack> b_thread_vec;
-                    vector_type<ComputeTypeB, KPack> b_thread_vec_up;
-
-                    static_for<0, KPack, 1>{}([&](auto ik) {
-                        a_thread_vec.template AsType<ComputeTypeA>()(ik) =
-                            a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                make_tuple(I0, I0, im_minor, k0, ik))>{}];
-                        b_thread_vec.template AsType<ComputeTypeB>()(ik) =
-                            b_thread_bufs[I0][Number<b_thread_desc_.CalculateOffset(
-                                make_tuple(in_major, I0, in_minor, k0, ik))>{}];
-                        b_thread_vec_up.template AsType<ComputeTypeB>()(ik) =
-                            b_thread_bufs_up[I0][Number<b_thread_desc_.CalculateOffset(
-                                make_tuple(in_major, I0, in_minor, k0, ik))>{}];
-                    });
+                    constexpr auto a_thread_offset = a_thread_desc_.CalculateOffset(
+                        make_tuple(I0, I0, im_minor, k0, I0));
+                    constexpr auto b_thread_offset = b_thread_desc_.CalculateOffset(
+                        make_tuple(in_major, I0, in_minor, k0, I0));
+                    const auto& a_thread_vec =
+                        a_thread_buf.GetVectorTypeReference(Number<a_thread_offset>{});
+                    const auto& b_thread_vec =
+                        b_thread_bufs[I0].GetVectorTypeReference(Number<b_thread_offset>{});
+                    const auto& b_thread_vec_up =
+                        b_thread_bufs_up[I0].GetVectorTypeReference(Number<b_thread_offset>{});
 
                     using mfma_input_type_a =
                         typename vector_type<ComputeTypeA,
@@ -959,21 +961,16 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                             b_scale_thread_bufs_up(I1)[Number<b_scale_offset + s>{}];
                     });
 
-                    vector_type<ComputeTypeA, KPack> a_thread_vec;
-                    vector_type<ComputeTypeB, KPack> b_thread_vec;
-                    vector_type<ComputeTypeB, KPack> b_thread_vec_up;
-
-                    static_for<0, KPack, 1>{}([&](auto ik) {
-                        a_thread_vec.template AsType<ComputeTypeA>()(ik) =
-                            a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                make_tuple(I0, I0, im_minor, k0, ik))>{}];
-                        b_thread_vec.template AsType<ComputeTypeB>()(ik) =
-                            b_thread_bufs[I1][Number<b_thread_desc_.CalculateOffset(
-                                make_tuple(in_major, I0, in_minor, k0, ik))>{}];
-                        b_thread_vec_up.template AsType<ComputeTypeB>()(ik) =
-                            b_thread_bufs_up[I1][Number<b_thread_desc_.CalculateOffset(
-                                make_tuple(in_major, I0, in_minor, k0, ik))>{}];
-                    });
+                    constexpr auto a_thread_offset = a_thread_desc_.CalculateOffset(
+                        make_tuple(I0, I0, im_minor, k0, I0));
+                    constexpr auto b_thread_offset = b_thread_desc_.CalculateOffset(
+                        make_tuple(in_major, I0, in_minor, k0, I0));
+                    const auto& a_thread_vec =
+                        a_thread_buf.GetVectorTypeReference(Number<a_thread_offset>{});
+                    const auto& b_thread_vec =
+                        b_thread_bufs[I1].GetVectorTypeReference(Number<b_thread_offset>{});
+                    const auto& b_thread_vec_up =
+                        b_thread_bufs_up[I1].GetVectorTypeReference(Number<b_thread_offset>{});
 
                     using mfma_input_type_a =
                         typename vector_type<ComputeTypeA,
@@ -1081,21 +1078,16 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                             b_scale_thread_bufs_up(I0)[Number<b_scale_offset + s>{}];
                     });
 
-                    vector_type<ComputeTypeA, KPack> a_thread_vec;
-                    vector_type<ComputeTypeB, KPack> b_thread_vec;
-                    vector_type<ComputeTypeB, KPack> b_thread_vec_up;
-
-                    static_for<0, KPack, 1>{}([&](auto ik) {
-                        a_thread_vec.template AsType<ComputeTypeA>()(ik) =
-                            a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                make_tuple(I0, I0, im_minor, k0, ik))>{}];
-                        b_thread_vec.template AsType<ComputeTypeB>()(ik) =
-                            b_thread_bufs[I0][Number<b_thread_desc_.CalculateOffset(
-                                make_tuple(in_major, I0, in_minor, k0, ik))>{}];
-                        b_thread_vec_up.template AsType<ComputeTypeB>()(ik) =
-                            b_thread_bufs_up[I0][Number<b_thread_desc_.CalculateOffset(
-                                make_tuple(in_major, I0, in_minor, k0, ik))>{}];
-                    });
+                    constexpr auto a_thread_offset = a_thread_desc_.CalculateOffset(
+                        make_tuple(I0, I0, im_minor, k0, I0));
+                    constexpr auto b_thread_offset = b_thread_desc_.CalculateOffset(
+                        make_tuple(in_major, I0, in_minor, k0, I0));
+                    const auto& a_thread_vec =
+                        a_thread_buf.GetVectorTypeReference(Number<a_thread_offset>{});
+                    const auto& b_thread_vec =
+                        b_thread_bufs[I0].GetVectorTypeReference(Number<b_thread_offset>{});
+                    const auto& b_thread_vec_up =
+                        b_thread_bufs_up[I0].GetVectorTypeReference(Number<b_thread_offset>{});
 
                     using mfma_input_type_a =
                         typename vector_type<ComputeTypeA,
