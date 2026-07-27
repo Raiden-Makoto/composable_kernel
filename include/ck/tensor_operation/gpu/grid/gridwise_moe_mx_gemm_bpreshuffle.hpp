@@ -1648,7 +1648,9 @@ struct GridwiseMoeGemmMX_BPreshuffle
                                                 gate = gate * topk_weights.AsType<float>()[m5];
                                                 up   = up * topk_weights.AsType<float>()[m5];
                                             }
-                                            tensor_operation::element_wise::Silu{}(gate, gate);
+                                            gate =
+                                                gate *
+                                                math::__ocml_native_recip_f32(1.0f + math::exp(-gate));
                                             c_thread_buf_fp32(cidx) = gate * up;
                                         }
                                         else if(ActivationOperation == Activation::gelu_and_mul)
@@ -2145,7 +2147,9 @@ struct GridwiseMoeGemmMX_BPreshuffle
                                                 gate = gate * topk_weights.AsType<float>()[m5];
                                                 up   = up * topk_weights.AsType<float>()[m5];
                                             }
-                                            tensor_operation::element_wise::Silu{}(gate, gate);
+                                            gate =
+                                                gate *
+                                                math::__ocml_native_recip_f32(1.0f + math::exp(-gate));
                                             c_thread_buf_fp32(cidx) = gate * up;
                                         }
                                         else if(ActivationOperation == Activation::gelu_and_mul)
