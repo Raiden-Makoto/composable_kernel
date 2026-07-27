@@ -426,7 +426,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                         make_tuple(m0, k0, I0));
 
                     static_for<0, a_scale_thread_vec_size, 1>{}([&](auto s) {
-                        a_scale_thread_bufs(scale_mem_buf)[Number<dst_offset + s>{}] =
+                        a_scale_thread_bufs(scale_mem_buf)(Number<dst_offset + s>{}) =
                             type_convert<AScaleDataType>(
                                 scale.template AsType<AScaleDataType>()[s]);
                     });
@@ -446,10 +446,10 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                         make_tuple(n0, k0, I0));
 
                     static_for<0, b_scale_thread_vec_size, 1>{}([&](auto s) {
-                        b_scale_thread_bufs(scale_mem_buf)[Number<dst_offset + s>{}] =
+                        b_scale_thread_bufs(scale_mem_buf)(Number<dst_offset + s>{}) =
                             type_convert<BScaleDataType>(
                                 gate_scale.template AsType<BScaleDataType>()[s]);
-                        b_scale_thread_bufs_up(scale_mem_buf)[Number<dst_offset + s>{}] =
+                        b_scale_thread_bufs_up(scale_mem_buf)(Number<dst_offset + s>{}) =
                             type_convert<BScaleDataType>(
                                 up_scale.template AsType<BScaleDataType>()[s]);
                     });
