@@ -161,50 +161,6 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
     static constexpr index_t PrefillStages         = 1;
     static constexpr index_t GlobalBufferNum       = 1;
     static constexpr index_t HotloopLocalBufSwitch = MRepeat % 2 == 0 ? 0 : 1;
-    static constexpr index_t KGroup                = 1;
-
-    template <typename TileDesc_M0_M1_M2_M3_K>
-    __host__ __device__ static constexpr auto
-    MakeAGemmMmaTileDescriptor(const TileDesc_M0_M1_M2_M3_K&)
-    {
-        constexpr index_t M0 = TileDesc_M0_M1_M2_M3_K{}.GetLength(Number<0>{});
-        constexpr index_t M1 = TileDesc_M0_M1_M2_M3_K{}.GetLength(Number<1>{});
-        constexpr index_t M2 = TileDesc_M0_M1_M2_M3_K{}.GetLength(Number<2>{});
-        constexpr index_t M3 = TileDesc_M0_M1_M2_M3_K{}.GetLength(Number<3>{});
-        constexpr index_t K2 = KPack / KGroup;
-        constexpr index_t K1 = WaveSize / NPerXDL;
-        constexpr index_t K0 = KRepeat * KGroup;
-
-        return transform_tensor_descriptor(
-            TileDesc_M0_M1_M2_M3_K{},
-            make_tuple(
-                make_pass_through_transform(Number<M0>{}),
-                make_pass_through_transform(Number<M1>{}),
-                make_pass_through_transform(Number<M2>{}),
-                make_pass_through_transform(Number<M3>{}),
-                make_unmerge_transform(make_tuple(Number<K0>{}, Number<K1>{}, Number<K2>{}))),
-            make_tuple(Sequence<0>{},
-                       Sequence<1>{},
-                       Sequence<2>{},
-                       Sequence<3>{},
-                       Sequence<4>{}),
-            make_tuple(Sequence<0>{},
-                       Sequence<1>{},
-                       Sequence<2>{},
-                       Sequence<3>{},
-                       Sequence<4, 5, 6>{}));
-    }
-
-    static constexpr auto a_block_desc_m0_m1_m2_m3_k0_k1_k2 =
-        MakeAGemmMmaTileDescriptor(a_block_desc_m0_m1_m2_m3_k);
-
-    __device__ static auto CalculateAThreadOriginDataIndex7D()
-    {
-        const auto wave_idx     = GetWaveIdx();
-        const auto xdlops_a_idx = xdlops_gemm.CalculateAThreadOriginDataIndex();
-
-        return make_tuple(0, wave_idx[I0], 0, xdlops_a_idx[I1], 0, xdlops_a_idx[I0], 0);
-    }
 
     static constexpr auto num_buffer_load_a_scale = MRepeat / MXdlPack * KRepeat / KXdlPack;
     static constexpr auto num_buffer_load_b_scale = NRepeat / NXdlPack * KRepeat / KXdlPack * 2;
@@ -506,17 +462,24 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
         // Local prefetch 1, sync the async load
         __builtin_amdgcn_s_waitcnt(async_vmcnt_encoding);
         block_sync_lds();
-        static_ford<Sequence<LocalPrefetchStages, KRepeat, KGroup>>{}([&](auto mkk) {
-            constexpr auto m0  = Number<mkk[Number<0>{}]>{};
-            constexpr auto k0  = Number<mkk[Number<1>{}]>{};
-            constexpr auto kg0 = Number<mkk[Number<2>{}]>{};
-            a_thread_copy_.Run(
-                a_block_desc_m0_m1_m2_m3_k0_k1_k2,
-                make_tuple(I0, I0, m0, I0, Number<k0 * KGroup + kg0>{}, I0, I0),
-                a_block_bufs(I0),
-                a_thread_desc_,
-                make_tuple(m0, I0, I0, I0, k0, I0, Number<kg0 * A_K1>{}),
-                a_thread_buf);
+        static_ford<Sequence<LocalPrefetchStages, KRepeat>>{}([&](auto mk) {
+            constexpr auto m0     = Number<mk[Number<0>{}]>{};
+            constexpr auto k      = Number<mk[Number<1>{}]>{};
+            constexpr auto k_step = k * xdlops_gemm.KPerXdlops / APackedSize *
+                                    (APackedSize * KPack / xdlops_gemm.K1PerXdlops);
+            static_for<0, xdlops_gemm.K1PerXdlops / (APackedSize * KThreadChunk), 1>{}(
+                [&](auto chunk) {
+                    constexpr auto a_k_step_chunk =
+                        k_step + chunk * KThreadChunk * xdlops_gemm.mfma_instr.num_input_blks;
+                    a_thread_copy_.Run(
+                        a_block_desc_m0_m1_m2_m3_k,
+                        make_tuple(I0, I0, Number<m0 % MXdlPack>{}, I0, Number<a_k_step_chunk>{}),
+                        a_block_bufs(I0),
+                        a_thread_desc_,
+                        make_tuple(
+                            I0, I0, Number<m0 % MXdlPack>{}, k, Number<chunk * KThreadChunk>{}),
+                        a_thread_buf);
+                });
         });
 
         // Global prefetch 2
@@ -666,14 +629,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                             static_for<0, KPack, 1>{}([&](auto ik) {
                                 a_thread_vec.template AsType<ComputeTypeA>()(ik) =
                                     a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                        make_tuple(
-                                            (m0 + HotloopLocalBufSwitch * scale_comp_buf) % 2,
-                                            I0,
-                                            I0,
-                                            I0,
-                                            k0,
-                                            I0,
-                                            ik))>{}];
+                                        make_tuple(I0, I0, im_minor, k0, ik))>{}];
                                 b_thread_vec.template AsType<ComputeTypeB>()(ik) =
                                     b_thread_bufs[scale_comp_buf]
                                                  [Number<b_thread_desc_.CalculateOffset(make_tuple(
@@ -746,32 +702,32 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                         constexpr auto lds_buf =
                             m0.value >= SwitchM ? scale_mem_buf : scale_comp_buf;
 
-                        static_ford<Sequence<KRepeat, KGroup>>{}([&](auto kk) {
-                            constexpr auto k0  = Number<kk[Number<0>{}]>{};
-                            constexpr auto kg0 = Number<kk[Number<1>{}]>{};
-                            a_thread_copy_.Run(
-                                a_block_desc_m0_m1_m2_m3_k0_k1_k2,
-                                make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
-                                                  (MRepeat / MXdlPack)>{},
-                                           I0,
-                                           Number<(m0 + LocalPrefetchStages) % MXdlPack>{},
-                                           I0,
-                                           Number<k0 * KGroup + kg0>{},
-                                           I0,
-                                           I0),
-                                a_block_bufs(Number<lds_buf>{}),
-                                a_thread_desc_,
-                                make_tuple(
-                                    Number<(m0 + LocalPrefetchStages +
-                                            HotloopLocalBufSwitch * scale_comp_buf) %
-                                           2>{},
-                                    I0,
-                                    I0,
-                                    I0,
-                                    k0,
-                                    I0,
-                                    Number<kg0 * A_K1>{}),
-                                a_thread_buf);
+                        static_for<0, KRepeat, 1>{}([&](auto k) {
+                            constexpr auto k_step = k * xdlops_gemm.KPerXdlops / APackedSize *
+                                                    (APackedSize * KPack / xdlops_gemm.K1PerXdlops);
+                            static_for<0,
+                                       xdlops_gemm.K1PerXdlops / (APackedSize * KThreadChunk),
+                                       1>{}([&](auto chunk) {
+                                constexpr auto a_k_step_chunk =
+                                    k_step +
+                                    chunk * KThreadChunk * xdlops_gemm.mfma_instr.num_input_blks;
+                                a_thread_copy_.Run(
+                                    a_block_desc_m0_m1_m2_m3_k,
+                                    make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
+                                                      (MRepeat / MXdlPack)>{},
+                                               I0,
+                                               Number<im_minor>{},
+                                               I0,
+                                               Number<a_k_step_chunk>{}),
+                                    a_block_bufs(Number<lds_buf>{}),
+                                    a_thread_desc_,
+                                    make_tuple(I0,
+                                               I0,
+                                               Number<im_minor>{},
+                                               k,
+                                               Number<chunk * KThreadChunk>{}),
+                                    a_thread_buf);
+                            });
                         });
                     });
 
@@ -890,7 +846,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                     static_for<0, KPack, 1>{}([&](auto ik) {
                         a_thread_vec.template AsType<ComputeTypeA>()(ik) =
                             a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                make_tuple(m0 % 2, I0, I0, I0, k0, I0, ik))>{}];
+                                make_tuple(I0, I0, im_minor, k0, ik))>{}];
                         b_thread_vec.template AsType<ComputeTypeB>()(ik) =
                             b_thread_bufs[I0][Number<b_thread_desc_.CalculateOffset(
                                 make_tuple(in_major, I0, in_minor, k0, ik))>{}];
@@ -940,29 +896,28 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
 
                 constexpr auto lds_buf = m0.value >= SwitchM ? I1 : I0;
 
-                static_ford<Sequence<KRepeat, KGroup>>{}([&](auto kk) {
-                    constexpr auto k0  = Number<kk[Number<0>{}]>{};
-                    constexpr auto kg0 = Number<kk[Number<1>{}]>{};
-                    a_thread_copy_.Run(
-                        a_block_desc_m0_m1_m2_m3_k0_k1_k2,
-                        make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
-                                          (MRepeat / MXdlPack)>{},
-                                   I0,
-                                   Number<(m0 + LocalPrefetchStages) % MXdlPack>{},
-                                   I0,
-                                   Number<k0 * KGroup + kg0>{},
-                                   I0,
-                                   I0),
-                        a_block_bufs(Number<lds_buf>{}),
-                        a_thread_desc_,
-                        make_tuple(Number<(m0 + LocalPrefetchStages) % 2>{},
-                                   I0,
-                                   I0,
-                                   I0,
-                                   k0,
-                                   I0,
-                                   Number<kg0 * A_K1>{}),
-                        a_thread_buf);
+                static_for<0, KRepeat, 1>{}([&](auto k) {
+                    constexpr auto k_step = k * xdlops_gemm.KPerXdlops / APackedSize *
+                                            (APackedSize * KPack / xdlops_gemm.K1PerXdlops);
+                    static_for<0, xdlops_gemm.K1PerXdlops / (APackedSize * KThreadChunk), 1>{}(
+                        [&](auto chunk) {
+                            constexpr auto a_k_step_chunk =
+                                k_step +
+                                chunk * KThreadChunk * xdlops_gemm.mfma_instr.num_input_blks;
+                            a_thread_copy_.Run(
+                                a_block_desc_m0_m1_m2_m3_k,
+                                make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
+                                                  (MRepeat / MXdlPack)>{},
+                                           I0,
+                                           Number<im_minor>{},
+                                           I0,
+                                           Number<a_k_step_chunk>{}),
+                                a_block_bufs(Number<lds_buf>{}),
+                                a_thread_desc_,
+                                make_tuple(
+                                    I0, I0, Number<im_minor>{}, k, Number<chunk * KThreadChunk>{}),
+                                a_thread_buf);
+                        });
                 });
             });
 
@@ -1011,7 +966,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                     static_for<0, KPack, 1>{}([&](auto ik) {
                         a_thread_vec.template AsType<ComputeTypeA>()(ik) =
                             a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                make_tuple(m0 % 2, I0, I0, I0, k0, I0, ik))>{}];
+                                make_tuple(I0, I0, im_minor, k0, ik))>{}];
                         b_thread_vec.template AsType<ComputeTypeB>()(ik) =
                             b_thread_bufs[I1][Number<b_thread_desc_.CalculateOffset(
                                 make_tuple(in_major, I0, in_minor, k0, ik))>{}];
@@ -1055,29 +1010,31 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                 });
                 if constexpr(m0.value < (MRepeat - LocalPrefetchStages))
                 {
-                    static_ford<Sequence<KRepeat, KGroup>>{}([&](auto kk) {
-                        constexpr auto k0  = Number<kk[Number<0>{}]>{};
-                        constexpr auto kg0 = Number<kk[Number<1>{}]>{};
-                        a_thread_copy_.Run(
-                            a_block_desc_m0_m1_m2_m3_k0_k1_k2,
-                            make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
-                                              (MRepeat / MXdlPack)>{},
-                                       I0,
-                                       Number<(m0 + LocalPrefetchStages) % MXdlPack>{},
-                                       I0,
-                                       Number<k0 * KGroup + kg0>{},
-                                       I0,
-                                       I0),
-                            a_block_bufs(I1),
-                            a_thread_desc_,
-                            make_tuple(Number<(m0 + LocalPrefetchStages) % 2>{},
-                                       I0,
-                                       I0,
-                                       I0,
-                                       k0,
-                                       I0,
-                                       Number<kg0 * A_K1>{}),
-                            a_thread_buf);
+                    static_for<0, KRepeat, 1>{}([&](auto k) {
+                        constexpr auto k_step = k * xdlops_gemm.KPerXdlops / APackedSize *
+                                                (APackedSize * KPack / xdlops_gemm.K1PerXdlops);
+                        static_for<0, xdlops_gemm.K1PerXdlops / (APackedSize * KThreadChunk), 1>{}(
+                            [&](auto chunk) {
+                                constexpr auto a_k_step_chunk =
+                                    k_step +
+                                    chunk * KThreadChunk * xdlops_gemm.mfma_instr.num_input_blks;
+                                a_thread_copy_.Run(
+                                    a_block_desc_m0_m1_m2_m3_k,
+                                    make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
+                                                      (MRepeat / MXdlPack)>{},
+                                               I0,
+                                               Number<im_minor>{},
+                                               I0,
+                                               Number<a_k_step_chunk>{}),
+                                    a_block_bufs(I1),
+                                    a_thread_desc_,
+                                    make_tuple(I0,
+                                               I0,
+                                               Number<im_minor>{},
+                                               k,
+                                               Number<chunk * KThreadChunk>{}),
+                                    a_thread_buf);
+                            });
                     });
                 }
             });
@@ -1131,7 +1088,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                     static_for<0, KPack, 1>{}([&](auto ik) {
                         a_thread_vec.template AsType<ComputeTypeA>()(ik) =
                             a_thread_buf[Number<a_thread_desc_.CalculateOffset(
-                                make_tuple(m0 % 2, I0, I0, I0, k0, I0, ik))>{}];
+                                make_tuple(I0, I0, im_minor, k0, ik))>{}];
                         b_thread_vec.template AsType<ComputeTypeB>()(ik) =
                             b_thread_bufs[I0][Number<b_thread_desc_.CalculateOffset(
                                 make_tuple(in_major, I0, in_minor, k0, ik))>{}];
@@ -1175,51 +1132,53 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                 });
                 if constexpr(m0.value < (MRepeat - LocalPrefetchStages))
                 {
-                    static_ford<Sequence<KRepeat, KGroup>>{}([&](auto kk) {
-                        constexpr auto k0  = Number<kk[Number<0>{}]>{};
-                        constexpr auto kg0 = Number<kk[Number<1>{}]>{};
-                        a_thread_copy_.Run(
-                            a_block_desc_m0_m1_m2_m3_k0_k1_k2,
-                            make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
-                                              (MRepeat / MXdlPack)>{},
-                                       I0,
-                                       Number<(m0 + LocalPrefetchStages) % MXdlPack>{},
-                                       I0,
-                                       Number<k0 * KGroup + kg0>{},
-                                       I0,
-                                       I0),
-                            a_block_bufs(I0),
-                            a_thread_desc_,
-                            make_tuple(Number<(m0 + LocalPrefetchStages) % 2>{},
-                                       I0,
-                                       I0,
-                                       I0,
-                                       k0,
-                                       I0,
-                                       Number<kg0 * A_K1>{}),
-                            a_thread_buf);
+                    static_for<0, KRepeat, 1>{}([&](auto k) {
+                        constexpr auto k_step = k * xdlops_gemm.KPerXdlops / APackedSize *
+                                                (APackedSize * KPack / xdlops_gemm.K1PerXdlops);
+                        static_for<0, xdlops_gemm.K1PerXdlops / (APackedSize * KThreadChunk), 1>{}(
+                            [&](auto chunk) {
+                                constexpr auto a_k_step_chunk =
+                                    k_step +
+                                    chunk * KThreadChunk * xdlops_gemm.mfma_instr.num_input_blks;
+                                a_thread_copy_.Run(
+                                    a_block_desc_m0_m1_m2_m3_k,
+                                    make_tuple(Number<((m0 + LocalPrefetchStages) / MXdlPack) %
+                                                      (MRepeat / MXdlPack)>{},
+                                               I0,
+                                               Number<im_minor>{},
+                                               I0,
+                                               Number<a_k_step_chunk>{}),
+                                    a_block_bufs(I0),
+                                    a_thread_desc_,
+                                    make_tuple(I0,
+                                               I0,
+                                               Number<im_minor>{},
+                                               k,
+                                               Number<chunk * KThreadChunk>{}),
+                                    a_thread_buf);
+                            });
                     });
                 }
             });
         }
     }
 
-    // A[ARegBuf, MWave, MSelect, MLane, KRepeat, KLane, KPack]
-    static constexpr auto ARegBuf = 2;
+    //  Length:  A[ARegBuf, MWave, MXdlPack, KRepeat, KPack]
+    //  Order:     1        0      3         2        4
+    static constexpr auto ARegBuf        = 2;
     static constexpr auto a_thread_desc_ = make_naive_tensor_descriptor_packed(
-        make_tuple(
-            Number<ARegBuf>{}, I1, I1, I1, Number<KRepeat>{}, I1, Number<KPack>{}));
+        make_tuple(Number<ARegBuf>{}, I1, Number<MXdlPack>{}, Number<KRepeat>{}, Number<KPack>{}));
 
     using AThreadCopy = ThreadwiseTensorSliceTransfer_v4<ADataType,
                                                          ComputeTypeA,
-                                                         decltype(a_block_desc_m0_m1_m2_m3_k0_k1_k2),
+                                                         decltype(a_block_desc_m0_m1_m2_m3_k),
                                                          decltype(a_thread_desc_),
-                                                         Sequence<1, 1, 1, 1, 1, 1, KPack / KGroup>,
-                                                         Sequence<0, 1, 2, 3, 4, 5, 6>,
-                                                         6,
+                                                         Sequence<1, 1, 1, 1, KThreadChunk>,
+                                                         Sequence<0, 1, 2, 3, 4>,
+                                                         4,
                                                          A_K1,
                                                          A_K1>;
-    AThreadCopy a_thread_copy_{CalculateAThreadOriginDataIndex7D()};
+    AThreadCopy a_thread_copy_{Base::CalculateAThreadOriginDataIndex()};
 
     // TODO: make this field protected when a_scale_thread_copy_ is moved
     // here
