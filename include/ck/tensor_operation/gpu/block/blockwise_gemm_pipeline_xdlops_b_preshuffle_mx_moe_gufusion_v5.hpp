@@ -208,6 +208,102 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
         return num_loop % 2 == 0 ? TailNumber::Even : TailNumber::Odd;
     }
 
+    // Scheduler for one K stage pass. Every K-proportional instruction group is one
+    // KStageRepeat-th of a whole K tile; the A global load only exists in the pass that also
+    // rotates the LDS buffer, so its VMEM group is dropped otherwise.
+    template <bool WithAGlobalLoad>
+    __device__ static constexpr auto HotLoopStageScheduler()
+    {
+        constexpr auto num_ds_read_inst_a =
+            (HotLoopInstList::A_LDS_Read_Width * sizeof(ADataType) == 16
+                 ? HotLoopInstList::A_LDS_Read_Inst_Num
+                 : HotLoopInstList::A_LDS_Read_Inst_Num / 2) /
+            KStageRepeat;
+
+        constexpr auto num_buffer_load_inst_a = HotLoopInstList::A_Buffer_Load_Inst_Num;
+        constexpr auto num_buffer_load_stage1 =
+            (HotLoopInstList::B_Buffer_Load_Inst_Num * 2 + num_buffer_load_a_scale +
+             num_buffer_load_b_scale) /
+            KStageRepeat;
+
+        constexpr auto num_mfma_inst =
+            HotLoopInstList::C_MFMA_Inst_Num * APackedSize * 2 / KStageRepeat;
+        constexpr auto mfma_cycle = HotLoopInstList::C_MFMA_Inst_Cycle;
+
+        constexpr auto ds_read_a_issue_cycle =
+            HotLoopInstList::A_LDS_Read_Width * sizeof(ADataType) == 16 ? 8 : 4;
+        constexpr auto ds_read_a_mfma_rate =
+            math::integer_divide_ceil(mfma_cycle - 8, 2 * ds_read_a_issue_cycle);
+
+        constexpr auto num_total_stages  = MRepeat;
+        constexpr auto num_mfma_perstage = num_mfma_inst / num_total_stages;
+        constexpr auto num_ds_read_a_mfma_perstage =
+            math::integer_divide_ceil(num_ds_read_inst_a / num_total_stages, ds_read_a_mfma_rate);
+
+        constexpr auto num_a_load_stages = WithAGlobalLoad ? 2 : 0;
+        constexpr auto num_b_load_stages = num_total_stages - num_a_load_stages;
+
+        constexpr auto buffer_load_perstage_more =
+            math::integer_divide_ceil(num_buffer_load_stage1, num_b_load_stages);
+        constexpr auto buffer_load_perstage_less =
+            math::max(math::integer_divide_floor(num_buffer_load_stage1, num_b_load_stages), 1);
+
+        constexpr auto buffer_load_stages_more =
+            num_buffer_load_stage1 -
+            math::integer_divide_floor(num_buffer_load_stage1, num_b_load_stages) *
+                num_b_load_stages;
+
+        constexpr auto interval_more = math::max(num_mfma_perstage / buffer_load_perstage_more, 1);
+        constexpr auto interval_less = math::max(num_mfma_perstage / buffer_load_perstage_less, 1);
+
+        // B and scale loads for the next stage, spread over the MFMAs of this stage
+        static_ford<Sequence<buffer_load_stages_more, num_mfma_perstage>>{}([&](auto ii) {
+            constexpr auto imfma = Number<ii[Number<1>{}]>{};
+            __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+            if constexpr(imfma % interval_more == 0)
+            {
+                __builtin_amdgcn_sched_group_barrier(0x020, 1, 0); // VMEM read
+            }
+            if constexpr(imfma >= (num_mfma_perstage - num_ds_read_a_mfma_perstage))
+            {
+                __builtin_amdgcn_sched_group_barrier(0x100, ds_read_a_mfma_rate, 0); // DS read
+            }
+        });
+
+        static_ford<Sequence<num_b_load_stages - buffer_load_stages_more, num_mfma_perstage>>{}(
+            [&](auto ii) {
+                constexpr auto imfma = Number<ii[Number<1>{}]>{};
+                __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                if constexpr(imfma % interval_less == 0)
+                {
+                    __builtin_amdgcn_sched_group_barrier(0x020, 1, 0); // VMEM read
+                }
+                if constexpr(imfma >= (num_mfma_perstage - num_ds_read_a_mfma_perstage))
+                {
+                    __builtin_amdgcn_sched_group_barrier(0x100, ds_read_a_mfma_rate, 0); // DS read
+                }
+            });
+
+        // LDS rotation pass: next tile's A global load
+        if constexpr(WithAGlobalLoad)
+        {
+            constexpr auto interval_a = math::max(
+                num_mfma_perstage / math::max(num_buffer_load_inst_a / num_a_load_stages, 1), 1);
+            static_ford<Sequence<num_a_load_stages, num_mfma_perstage>>{}([&](auto ii) {
+                constexpr auto imfma = Number<ii[Number<1>{}]>{};
+                __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                if constexpr(imfma % interval_a == 0)
+                {
+                    __builtin_amdgcn_sched_group_barrier(0x020, 1, 0); // VMEM read
+                }
+                if constexpr(imfma >= (num_mfma_perstage - num_ds_read_a_mfma_perstage))
+                {
+                    __builtin_amdgcn_sched_group_barrier(0x100, ds_read_a_mfma_rate, 0); // DS read
+                }
+            });
+        }
+    }
+
     __device__ static constexpr auto HotLoopScheduler()
     {
         // A/B split schedule
@@ -695,6 +791,12 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                         read_a_stage(m_major, im_minor, Number<0>{}, a_block_bufs(mem_lds));
                     }
                 });
+
+                if constexpr(MPerBlock >= 64)
+                {
+                    HotLoopStageScheduler<is_last && do_global_copy.value != 0>();
+                }
+                __builtin_amdgcn_sched_barrier(0);
             });
         };
 
