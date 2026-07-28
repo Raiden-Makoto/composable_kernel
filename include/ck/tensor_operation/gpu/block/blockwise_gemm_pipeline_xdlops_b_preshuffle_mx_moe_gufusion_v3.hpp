@@ -504,11 +504,15 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
             b_scale_block_offset += (KRepeat / KXdlPack) * b_scale_k_stride;
         };
 
+        const auto a_block_coord_step =
+            make_tensor_coordinate_step(a_grid_desc, a_block_copy_step);
+
         // Global prefetch 1
         a_blockwise_copy.Run(a_grid_desc, a_grid_buf, a_block_desc, a_block_bufs(I0));
         load_b_block(I0);
 
-        a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
+        a_blockwise_copy.MoveSrcSliceWindowWithPrecomputedStep(
+            a_grid_desc, a_block_copy_step, a_block_coord_step);
 
         load_scale_block(I0);
 
@@ -537,7 +541,8 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
 
         // Global prefetch 2
         a_blockwise_copy.Run(a_grid_desc, a_grid_buf, a_block_desc, a_block_bufs(I1));
-        a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
+        a_blockwise_copy.MoveSrcSliceWindowWithPrecomputedStep(
+            a_grid_desc, a_block_copy_step, a_block_coord_step);
 
         // Initialize C
         c_thread_buf.Clear();
@@ -670,7 +675,8 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
                                                  a_grid_buf,
                                                  a_block_desc,
                                                  a_block_bufs(scale_comp_buf));
-                            a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
+                            a_blockwise_copy.MoveSrcSliceWindowWithPrecomputedStep(
+                                a_grid_desc, a_block_copy_step, a_block_coord_step);
                         }
 
                         constexpr auto lds_buf =

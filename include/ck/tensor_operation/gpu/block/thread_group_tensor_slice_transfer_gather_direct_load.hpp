@@ -253,18 +253,45 @@ struct ThreadGroupTensorSliceTransfer_Gather_DirectLoad
         const auto src_forward_steps  = generate_steps(src_desc, 1);
         const auto src_backward_steps = generate_steps(src_desc, -1);
 
+        constexpr bool is_src_coord_invariant = []() {
+            bool is_invariant = true;
+            static_for<0, nDim, 1>{}([&](auto i) {
+                if constexpr(i.value != GatherDim && thread_slice_lengths.At(i) != 1)
+                {
+                    is_invariant = false;
+                }
+            });
+            return is_invariant;
+        }();
+
+        IndexType invariant_src_offset = 0;
+        if constexpr(is_src_coord_invariant)
+        {
+            Index new_index = src_coord_.GetIndex();
+            new_index(I0)   = src_coord_.GetIndex().At(I0) ^
+                            ((threadIdx.x / block_slice_lengths.At(I0)) %
+                             block_slice_lengths.At(I0));
+            src_coord_xor_     = make_tensor_coordinate(src_desc, new_index);
+            invariant_src_offset = src_coord_xor_.GetOffset();
+        }
+
         // Loop over the destination block and copy data.
         static_ford<decltype(dst_access_lengths)>{}([&](auto ordered_dst_access_idx) {
             IndexType gather_offset = gather_offsets_[ordered_dst_access_idx[Number<GatherDim>{}]];
-            // src_coord_xor_          = src_coord_;
-            // src_coord_xor_.GetIndex().At(I0) =
-            //     src_coord_.GetIndex().At(I0) ^ ((threadIdx.x % 64) / 8);
-            Index new_index = src_coord_.GetIndex();
-            new_index(I0)   = src_coord_.GetIndex().At(I0) ^
-                            ((threadIdx.x / block_slice_lengths.At(I0)) % block_slice_lengths.At(I0));
-            src_coord_xor_  = make_tensor_coordinate(src_desc, new_index);
-
-            const IndexType src_offset = src_coord_xor_.GetOffset() + gather_offset;
+            IndexType src_offset;
+            if constexpr(is_src_coord_invariant)
+            {
+                src_offset = invariant_src_offset + gather_offset;
+            }
+            else
+            {
+                Index new_index = src_coord_.GetIndex();
+                new_index(I0) =
+                    src_coord_.GetIndex().At(I0) ^
+                    ((threadIdx.x / block_slice_lengths.At(I0)) % block_slice_lengths.At(I0));
+                src_coord_xor_ = make_tensor_coordinate(src_desc, new_index);
+                src_offset     = src_coord_xor_.GetOffset() + gather_offset;
+            }
             const IndexType dst_offset = __builtin_amdgcn_readfirstlane(dst_coord_.GetOffset());
 
             // Check if src data is not in the logic padding area.
@@ -361,6 +388,14 @@ struct ThreadGroupTensorSliceTransfer_Gather_DirectLoad
     {
         src_slice_origin_ = src_slice_origin_ + step;
         src_coord_        = make_tensor_coordinate(src_desc, src_slice_origin_);
+    }
+
+    __device__ void MoveSrcSliceWindowWithPrecomputedStep(const SrcDesc& src_desc,
+                                                          const Index& step,
+                                                          const SrcCoordStep& coord_step)
+    {
+        src_slice_origin_ = src_slice_origin_ + step;
+        move_tensor_coordinate(src_desc, src_coord_, coord_step);
     }
 
     template <typename DescType>
