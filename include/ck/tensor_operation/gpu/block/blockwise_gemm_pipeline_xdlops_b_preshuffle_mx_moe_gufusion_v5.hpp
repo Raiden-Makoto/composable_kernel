@@ -173,9 +173,10 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
     static constexpr index_t KStageRepeat = 2;
     static constexpr index_t KStage      = KRepeat / KStageRepeat;
 
-    // Double buffering the B/scale stage operands overlaps their loads with the previous stage's
-    // MFMAs but costs another stage of registers, which keeps the kernel at 2 waves per SIMD.
-    static constexpr bool BStageDoubleBuffer = false;
+    // Double buffering the B/scale stage operands costs a stage of registers and holds the kernel
+    // at 2 waves per SIMD, but measured faster than the single-buffer 3-wave variant: this kernel
+    // is bound by B read latency, not by wave count.
+    static constexpr bool BStageDoubleBuffer = true;
 
     // Only one stage worth of B and scale loads is in flight during the prologue.
     static constexpr auto stage_vmcnt = async_vmcnt / KStageRepeat;
