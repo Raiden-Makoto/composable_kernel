@@ -1387,20 +1387,11 @@ struct GridwiseMoeGemmMX_BPreshuffle
 
         // Thread-wise copy
         // K0 -> N0/NWave -> NWave -> KLane -> NLane -> KPack
-        auto b_block_bufs = [&]() {
-            if constexpr(IsInputGemm && KPerBlock == 256)
-            {
-                return make_tuple();
-            }
-            else
-            {
-                auto b_block_buf_ping = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
-                    b_block_desc_bk0_n_bk1.GetElementSpaceSize());
-                auto b_block_buf_pong = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
-                    b_block_desc_bk0_n_bk1.GetElementSpaceSize());
-                return make_tuple(b_block_buf_ping, b_block_buf_pong);
-            }
-        }();
+        auto b_block_buf_ping = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
+            b_block_desc_bk0_n_bk1.GetElementSpaceSize());
+        auto b_block_buf_pong = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
+            b_block_desc_bk0_n_bk1.GetElementSpaceSize());
+        auto b_block_bufs = make_tuple(b_block_buf_ping, b_block_buf_pong);
 
         auto b_blockwise_copy =
             ThreadwiseTensorSliceTransfer_v2<BDataType,
@@ -1894,20 +1885,11 @@ struct GridwiseMoeGemmMX_BPreshuffle
 
         // Thread-wise copy
         // K0 -> N0/NWave -> NWave -> KLane -> NLane -> KPack
-        auto b_block_bufs = [&]() {
-            if constexpr(IsInputGemm && KPerBlock == 256)
-            {
-                return make_tuple();
-            }
-            else
-            {
-                auto b_block_buf_ping = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
-                    b_block_desc_bk0_n_bk1.GetElementSpaceSize());
-                auto b_block_buf_pong = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
-                    b_block_desc_bk0_n_bk1.GetElementSpaceSize());
-                return make_tuple(b_block_buf_ping, b_block_buf_pong);
-            }
-        }();
+        auto b_block_buf_ping = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
+            b_block_desc_bk0_n_bk1.GetElementSpaceSize());
+        auto b_block_buf_pong = make_static_buffer<AddressSpaceEnum::Vgpr, BDataType>(
+            b_block_desc_bk0_n_bk1.GetElementSpaceSize());
+        auto b_block_bufs = make_tuple(b_block_buf_ping, b_block_buf_pong);
 
         auto b_blockwise_copy =
             ThreadwiseTensorSliceTransfer_v2<BDataType,
