@@ -173,6 +173,10 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
     static constexpr index_t KStageRepeat = 2;
     static constexpr index_t KStage      = KRepeat / KStageRepeat;
 
+    // Double buffering the B/scale stage operands overlaps their loads with the previous stage's
+    // MFMAs but costs another stage of registers, which keeps the kernel at 2 waves per SIMD.
+    static constexpr bool BStageDoubleBuffer = false;
+
     // Only one stage worth of B and scale loads is in flight during the prologue.
     static constexpr auto stage_vmcnt = async_vmcnt / KStageRepeat;
     static constexpr auto stage_vmcnt_encoding = 3952 + stage_vmcnt % 16 + stage_vmcnt / 16 * 16384;
@@ -744,15 +748,27 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                              auto do_lds_sync,
                              auto load_after_last,
                              auto prefetch_next_tile) {
-            static_for<0, KStageRepeat, 1>{}([&](auto stage) {
-                constexpr auto cur_buf     = Number<stage.value % 2>{};
-                constexpr auto nxt_buf     = Number<(stage.value + 1) % 2>{};
-                constexpr bool is_last     = stage.value == (KStageRepeat - 1);
+            ignore = load_after_last;
 
-                if constexpr(!is_last || load_after_last.value != 0)
+            static_for<0, KStageRepeat, 1>{}([&](auto stage) {
+                constexpr auto cur_buf = Number<BStageDoubleBuffer ? stage.value % 2 : 0>{};
+                constexpr auto nxt_buf =
+                    Number<BStageDoubleBuffer ? (stage.value + 1) % 2 : 0>{};
+                constexpr bool is_last = stage.value == (KStageRepeat - 1);
+
+                if constexpr(BStageDoubleBuffer)
                 {
-                    load_b_stage(nxt_buf);
-                    load_scale_stage(nxt_buf);
+                    if constexpr(!is_last || load_after_last.value != 0)
+                    {
+                        load_b_stage(nxt_buf);
+                        load_scale_stage(nxt_buf);
+                    }
+                }
+                else
+                {
+                    // Single stage buffer: this stage's own operands, no cross-stage overlap.
+                    load_b_stage(cur_buf);
+                    load_scale_stage(cur_buf);
                 }
 
                 static_for<0, MRepeat, 1>{}([&](auto m0) {
@@ -802,14 +818,20 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
 
         // Global prefetch 1
         a_blockwise_copy.Run(a_grid_desc, a_grid_buf, a_block_desc, a_block_bufs(I0));
-        load_b_stage(I0);
+        if constexpr(BStageDoubleBuffer)
+        {
+            load_b_stage(I0);
+        }
 
         a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
 
-        load_scale_stage(I0);
+        if constexpr(BStageDoubleBuffer)
+        {
+            load_scale_stage(I0);
+        }
 
         // Local prefetch 1, sync the async load
-        __builtin_amdgcn_s_waitcnt(stage_vmcnt_encoding);
+        __builtin_amdgcn_s_waitcnt(BStageDoubleBuffer ? stage_vmcnt_encoding : 3952);
         block_sync_lds();
         static_for<0, LocalPrefetchStages, 1>{}([&](auto m0) {
             read_a_stage(Number<(m0 / MXdlPack) % (MRepeat / MXdlPack)>{},
