@@ -857,7 +857,8 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
 
     //  Length:  A[ARegBuf, MWave, MXdlPack, KStage, KPack]
     //  Order:     1        0      3         2       4
-    static constexpr auto ARegBuf        = 2;
+    // Only slot 0 is ever addressed: the MXdlPack dimension already double-buffers the M slots.
+    static constexpr auto ARegBuf        = 1;
     static constexpr auto a_thread_desc_ = make_naive_tensor_descriptor_packed(
         make_tuple(Number<ARegBuf>{}, I1, Number<MXdlPack>{}, Number<KStage>{}, Number<KPack>{}));
 
