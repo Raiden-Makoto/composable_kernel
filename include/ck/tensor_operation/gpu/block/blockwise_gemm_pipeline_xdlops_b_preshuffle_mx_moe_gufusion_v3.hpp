@@ -359,7 +359,9 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
         const BScaleGridBuffer& b_scale_grid_buf_up,
         index_t num_loop) const
     {
-        ignore            = b_block_bufs;
+        ignore = b_block_bufs;
+        ignore = b_blockwise_copy_up;
+        ignore = b_block_copy_step;
         StaticBufferTupleOfVector<AddressSpaceEnum::Vgpr,
                                   ComputeTypeA,
                                   a_thread_desc_.GetElementSpaceSize() / KPack,
@@ -381,7 +383,49 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
 
         StaticallyIndexedArray<decltype(b_thread_buf), Number<2>{}> b_thread_bufs;
         StaticallyIndexedArray<decltype(b_thread_buf_up), Number<2>{}> b_thread_bufs_up;
-        constexpr auto b_block_origin_idx = make_tuple(I0, I0, I0, I0, I0);
+
+        auto b_block_offset = b_blockwise_copy.GetSrcOffset();
+        const auto b_block_n_stride =
+            b_grid_desc.CalculateOffset(make_multi_index(I1, I0, I0, I0, I0)) -
+            b_grid_desc.CalculateOffset(make_multi_index(I0, I0, I0, I0, I0));
+        const auto b_block_xdl_stride =
+            b_grid_desc.CalculateOffset(make_multi_index(I0, I0, I1, I0, I0)) -
+            b_grid_desc.CalculateOffset(make_multi_index(I0, I0, I0, I0, I0));
+        const auto b_block_k_stride =
+            b_grid_desc.CalculateOffset(make_multi_index(I0, I0, I0, I1, I0)) -
+            b_grid_desc.CalculateOffset(make_multi_index(I0, I0, I0, I0, I0));
+
+        using BBlockLoad =
+            typename vector_type<BDataType, BBlockTransferSrcScalarPerVector>::type;
+        constexpr auto b_block_desc_static = remove_cvref_t<BBlockDesc>{};
+
+        auto load_b_block = [&](auto mem_buf) {
+            static_for<0, NRepeat / NXdlPack, 1>{}([&](auto n0) {
+                static_for<0, NXdlPack, 1>{}([&](auto inxdl) {
+                    static_for<0, KRepeat, 1>{}([&](auto k0) {
+                        const auto src_offset = b_block_offset +
+                                                n0 * b_block_n_stride +
+                                                inxdl * b_block_xdl_stride +
+                                                k0 * b_block_k_stride;
+                        const auto gate =
+                            b_grid_buf.template Get<BBlockLoad>(src_offset, true);
+                        const auto up =
+                            b_grid_buf_up.template Get<BBlockLoad>(src_offset, true);
+                        constexpr auto dst_offset = b_block_desc_static.CalculateOffset(
+                            make_tuple(n0, I0, inxdl, k0, I0));
+
+                        static_for<0, BBlockTransferSrcScalarPerVector, 1>{}([&](auto s) {
+                            b_thread_bufs(mem_buf)(Number<dst_offset + s>{}) =
+                                type_convert<BDataType>(gate.template AsType<BDataType>()[s]);
+                            b_thread_bufs_up(mem_buf)(Number<dst_offset + s>{}) =
+                                type_convert<BDataType>(up.template AsType<BDataType>()[s]);
+                        });
+                    });
+                });
+            });
+
+            b_block_offset += KRepeat * b_block_k_stride;
+        };
 
         auto a_scale_thread_buf = make_static_buffer<AddressSpaceEnum::Vgpr, AScaleDataType>(
             a_scale_thread_desc.GetElementSpaceSize());
@@ -462,14 +506,9 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
 
         // Global prefetch 1
         a_blockwise_copy.Run(a_grid_desc, a_grid_buf, a_block_desc, a_block_bufs(I0));
-        b_blockwise_copy.Run(
-            b_grid_desc, b_grid_buf, b_block_desc, b_block_origin_idx, b_thread_bufs(I0));
-        b_blockwise_copy_up.Run(
-            b_grid_desc, b_grid_buf_up, b_block_desc, b_block_origin_idx, b_thread_bufs_up(I0));
+        load_b_block(I0);
 
         a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
-        b_blockwise_copy.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
-        b_blockwise_copy_up.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
 
         load_scale_block(I0);
 
@@ -512,22 +551,11 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
             do
             {
                 auto LoopFunc = [&](auto scale_comp_buf, auto scale_mem_buf) {
-                    b_blockwise_copy.Run(b_grid_desc,
-                                         b_grid_buf,
-                                         b_block_desc,
-                                         b_block_origin_idx,
-                                         b_thread_bufs(scale_mem_buf));
-                    b_blockwise_copy_up.Run(b_grid_desc,
-                                            b_grid_buf_up,
-                                            b_block_desc,
-                                            b_block_origin_idx,
-                                            b_thread_bufs_up(scale_mem_buf));
+                    load_b_block(scale_mem_buf);
 
                     load_scale_block(scale_mem_buf);
 
                     // a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
-                    b_blockwise_copy.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
-                    b_blockwise_copy_up.MoveSrcSliceWindow(b_grid_desc, b_block_copy_step);
 
                     static_for<0, MRepeat, 1>{}([&](auto m0) {
                         constexpr auto im_major = m0 / MXdlPack;
@@ -692,10 +720,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v3<
         // tail
         if constexpr(TailNum == TailNumber::Even)
         {
-            b_blockwise_copy.Run(
-                b_grid_desc, b_grid_buf, b_block_desc, b_block_origin_idx, b_thread_bufs(I1));
-            b_blockwise_copy_up.Run(
-                b_grid_desc, b_grid_buf_up, b_block_desc, b_block_origin_idx, b_thread_bufs_up(I1));
+            load_b_block(I1);
 
             load_scale_block(I1);
 
