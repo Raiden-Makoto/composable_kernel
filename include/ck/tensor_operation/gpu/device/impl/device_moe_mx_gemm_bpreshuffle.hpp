@@ -261,7 +261,8 @@ struct DeviceMoeGemmMXBPreShuffle : public DeviceMoEGemmMXBPreShuffle<ALayout,
             // TODO: Check if this is the right algorithm for minimum_occupancy
             constexpr index_t minimum_occupancy =
                 BlkGemmPipeSched == BlockGemmPipelineScheduler::Intrawave
-                    ? (BlkGemmPipelineVer == BlockGemmPipelineVersion::v3 &&
+                    ? ((BlkGemmPipelineVer == BlockGemmPipelineVersion::v3 ||
+                        BlkGemmPipelineVer == BlockGemmPipelineVersion::v5) &&
                        MPerBlock * NPerBlock * KPerBlock * sizeof(ADataType) <= 128 * 128 * 64 * 2)
                           ? 2
                           : 1
@@ -296,7 +297,8 @@ struct DeviceMoeGemmMXBPreShuffle : public DeviceMoEGemmMXBPreShuffle<ALayout,
                         }
                     }
                 }
-                else if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v3)
+                else if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v3 ||
+                                  BlkGemmPipelineVer == BlockGemmPipelineVersion::v5)
                 {
                     if(GridwiseGemm::CalculateKBlockLoopTailNum(K_split) == TailNumber::Odd)
                     {
@@ -345,7 +347,8 @@ struct DeviceMoeGemmMXBPreShuffle : public DeviceMoEGemmMXBPreShuffle<ALayout,
                         RunKernel(kernel);
                     }
                 }
-                else if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v3)
+                else if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v3 ||
+                                  BlkGemmPipelineVer == BlockGemmPipelineVersion::v5)
                 {
                     if(GridwiseGemm::CalculateKBlockLoopTailNum(K_split) == TailNumber::Odd)
                     {

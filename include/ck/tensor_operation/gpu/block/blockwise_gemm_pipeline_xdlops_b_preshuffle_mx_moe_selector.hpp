@@ -6,6 +6,7 @@
 #include "ck/tensor_operation/gpu/block/blockwise_gemm_pipeline_xdlops_b_preshuffle_mx_moe_v3.hpp"
 #include "ck/tensor_operation/gpu/block/blockwise_gemm_pipeline_xdlops_b_preshuffle_mx_moe_v1.hpp"
 #include "ck/tensor_operation/gpu/block/blockwise_gemm_pipeline_xdlops_b_preshuffle_mx_moe_gufusion_v3.hpp"
+#include "ck/tensor_operation/gpu/block/blockwise_gemm_pipeline_xdlops_b_preshuffle_mx_moe_gufusion_v5.hpp"
 
 namespace ck {
 template <BlockGemmPipelineVersion BlkGemmPipelineVer,
@@ -121,6 +122,38 @@ constexpr auto BlockGemmMXBPreshufflePipeline_Selector()
                 MRepeat,
                 NRepeat,
                 KPack>{};
+        }
+    }
+    else if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v5)
+    {
+        if constexpr(GUFusion)
+        {
+            return BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
+                BlkGemmPipeSche,
+                ThreadBlockSize,
+                ScaleBlockSize,
+                ADataType,
+                AScaleDataType,
+                BDataType,
+                BScaleDataType,
+                ATileDesc,
+                BTileDesc,
+                AMmaTileDesc,
+                BMmaTileDesc,
+                ABlockTransferSrcScalarPerVector,
+                BBlockTransferSrcScalarPerVector,
+                MPerBlock,
+                NPerBlock,
+                KPerBlock,
+                MPerXDL,
+                NPerXDL,
+                MRepeat,
+                NRepeat,
+                KPack>{};
+        }
+        else
+        {
+            return nullptr;
         }
     }
     else
