@@ -719,28 +719,29 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
 
                 if constexpr(ProbeSkipMfma)
                 {
-                    // Keep every operand live so the loads survive dead-code elimination. Both the
-                    // first and last lane of each fragment are read so the vector width cannot be
-                    // narrowed, which would change the fetched byte count.
-                    constexpr auto kLastA = Number<KPack - 1>{};
-                    probe_sink += static_cast<int32_t>(
-                        a_thread_vec.template AsType<ComputeTypeA>()[Number<0>{}].data);
-                    probe_sink +=
-                        static_cast<int32_t>(a_thread_vec.template AsType<ComputeTypeA>()[kLastA].data);
-                    probe_sink += static_cast<int32_t>(
-                        b_thread_vec.template AsType<ComputeTypeB>()[Number<0>{}].data);
-                    probe_sink +=
-                        static_cast<int32_t>(b_thread_vec.template AsType<ComputeTypeB>()[kLastA].data);
-                    probe_sink += static_cast<int32_t>(
-                        b_thread_vec_up.template AsType<ComputeTypeB>()[Number<0>{}].data);
-                    probe_sink += static_cast<int32_t>(
-                        b_thread_vec_up.template AsType<ComputeTypeB>()[kLastA].data);
-                    probe_sink += static_cast<int32_t>(
-                        a_scale_thread_vec.template AsType<AScaleDataType>()[Number<0>{}].data);
-                    probe_sink += static_cast<int32_t>(
-                        b_scale_thread_vec.template AsType<BScaleDataType>()[Number<0>{}].data);
-                    probe_sink += static_cast<int32_t>(
-                        b_scale_thread_vec_up.template AsType<BScaleDataType>()[Number<0>{}].data);
+                    // Opaque consumer for every operand the MFMAs would have read. Empty asm emits
+                    // no instructions but forces each full vector into registers, so neither the
+                    // loads nor their vector width can be optimized away.
+                    constexpr auto num_a_chunks =
+                        KPack / (xdlops_gemm.K1PerXdlops / APackedSize);
+                    constexpr auto num_b_chunks =
+                        KPack / (xdlops_gemm.K1PerXdlops / BPackedSize);
+                    static_for<0, num_a_chunks, 1>{}([&](auto c) {
+                        asm volatile(
+                            "" ::"v"(a_thread_vec.template AsType<mfma_input_type_a>()[c]));
+                    });
+                    static_for<0, num_b_chunks, 1>{}([&](auto c) {
+                        asm volatile(
+                            "" ::"v"(b_thread_vec.template AsType<mfma_input_type_b>()[c]));
+                        asm volatile(
+                            "" ::"v"(b_thread_vec_up.template AsType<mfma_input_type_b>()[c]));
+                    });
+                    asm volatile("" ::"v"(
+                        a_scale_thread_vec.template AsType<mfma_scale_input_type_a>()[Number<0>{}]));
+                    asm volatile("" ::"v"(
+                        b_scale_thread_vec.template AsType<mfma_scale_input_type_b>()[Number<0>{}]));
+                    asm volatile("" ::"v"(b_scale_thread_vec_up
+                                              .template AsType<mfma_scale_input_type_b>()[Number<0>{}]));
                 }
                 else
                 {
