@@ -719,13 +719,28 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
 
                 if constexpr(ProbeSkipMfma)
                 {
-                    // Keep every operand live so the loads survive dead-code elimination.
-                    probe_sink += a_thread_vec.template AsType<int32_t>()[Number<0>{}];
-                    probe_sink += b_thread_vec.template AsType<int32_t>()[Number<0>{}];
-                    probe_sink += b_thread_vec_up.template AsType<int32_t>()[Number<0>{}];
-                    probe_sink += a_scale_thread_vec.template AsType<int32_t>()[Number<0>{}];
-                    probe_sink += b_scale_thread_vec.template AsType<int32_t>()[Number<0>{}];
-                    probe_sink += b_scale_thread_vec_up.template AsType<int32_t>()[Number<0>{}];
+                    // Keep every operand live so the loads survive dead-code elimination. Both the
+                    // first and last lane of each fragment are read so the vector width cannot be
+                    // narrowed, which would change the fetched byte count.
+                    constexpr auto kLastA = Number<KPack - 1>{};
+                    probe_sink += static_cast<int32_t>(
+                        a_thread_vec.template AsType<ComputeTypeA>()[Number<0>{}].data);
+                    probe_sink +=
+                        static_cast<int32_t>(a_thread_vec.template AsType<ComputeTypeA>()[kLastA].data);
+                    probe_sink += static_cast<int32_t>(
+                        b_thread_vec.template AsType<ComputeTypeB>()[Number<0>{}].data);
+                    probe_sink +=
+                        static_cast<int32_t>(b_thread_vec.template AsType<ComputeTypeB>()[kLastA].data);
+                    probe_sink += static_cast<int32_t>(
+                        b_thread_vec_up.template AsType<ComputeTypeB>()[Number<0>{}].data);
+                    probe_sink += static_cast<int32_t>(
+                        b_thread_vec_up.template AsType<ComputeTypeB>()[kLastA].data);
+                    probe_sink += static_cast<int32_t>(
+                        a_scale_thread_vec.template AsType<AScaleDataType>()[Number<0>{}].data);
+                    probe_sink += static_cast<int32_t>(
+                        b_scale_thread_vec.template AsType<BScaleDataType>()[Number<0>{}].data);
+                    probe_sink += static_cast<int32_t>(
+                        b_scale_thread_vec_up.template AsType<BScaleDataType>()[Number<0>{}].data);
                 }
                 else
                 {
