@@ -178,6 +178,15 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
     // is bound by B read latency, not by wave count.
     static constexpr bool BStageDoubleBuffer = true;
 
+    // Diagnostic probes. Each one produces deliberately wrong results and exists only to partition
+    // the runtime; all three must be false for a usable kernel.
+    // ProbeSkipMfma:    keep every load and barrier, drop the MFMAs -> streaming floor.
+    // ProbeHoistLoads:  keep every MFMA and barrier, load operands once -> compute floor.
+    // ProbeDoubleBarrier: one extra block barrier per stage pass -> barrier cost slope.
+    static constexpr bool ProbeSkipMfma       = true;
+    static constexpr bool ProbeHoistLoads     = false;
+    static constexpr bool ProbeDoubleBarrier  = false;
+
     // Only one stage worth of B and scale loads is in flight during the prologue.
     static constexpr auto stage_vmcnt = async_vmcnt / KStageRepeat;
     static constexpr auto stage_vmcnt_encoding = 3952 + stage_vmcnt % 16 + stage_vmcnt / 16 * 16384;
@@ -476,6 +485,9 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
         static_assert(KRepeat % KStageRepeat == 0 && KStage % KXdlPack == 0,
                       "gufusion v5 needs a K tile that splits into whole K stages");
 
+        int32_t probe_sink = 0;
+        ignore             = probe_sink;
+
         StaticBufferTupleOfVector<AddressSpaceEnum::Vgpr,
                                   ComputeTypeA,
                                   a_thread_desc_.GetElementSpaceSize() / KPack,
@@ -705,23 +717,36 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                 constexpr index_t c_offset = c_thread_desc_.CalculateOffset(
                     make_tuple(im_major, in_major, im_minor, in_minor, 0));
 
-                // MFMA accumulation A * Gate
-                xdlops_gemm.template Run<ik_minor * MXdlPack + im_minor,
-                                         ik_minor * NXdlPack + in_minor>(
-                    a_thread_vec.template AsType<mfma_input_type_a>(),
-                    a_scale_thread_vec.template AsType<mfma_scale_input_type_a>(),
-                    b_thread_vec.template AsType<mfma_input_type_b>(),
-                    b_scale_thread_vec.template AsType<mfma_scale_input_type_b>(),
-                    c_thread_buf.GetVectorTypeReference(Number<c_offset>{}));
+                if constexpr(ProbeSkipMfma)
+                {
+                    // Keep every operand live so the loads survive dead-code elimination.
+                    probe_sink += a_thread_vec.template AsType<int32_t>()[Number<0>{}];
+                    probe_sink += b_thread_vec.template AsType<int32_t>()[Number<0>{}];
+                    probe_sink += b_thread_vec_up.template AsType<int32_t>()[Number<0>{}];
+                    probe_sink += a_scale_thread_vec.template AsType<int32_t>()[Number<0>{}];
+                    probe_sink += b_scale_thread_vec.template AsType<int32_t>()[Number<0>{}];
+                    probe_sink += b_scale_thread_vec_up.template AsType<int32_t>()[Number<0>{}];
+                }
+                else
+                {
+                    // MFMA accumulation A * Gate
+                    xdlops_gemm.template Run<ik_minor * MXdlPack + im_minor,
+                                             ik_minor * NXdlPack + in_minor>(
+                        a_thread_vec.template AsType<mfma_input_type_a>(),
+                        a_scale_thread_vec.template AsType<mfma_scale_input_type_a>(),
+                        b_thread_vec.template AsType<mfma_input_type_b>(),
+                        b_scale_thread_vec.template AsType<mfma_scale_input_type_b>(),
+                        c_thread_buf.GetVectorTypeReference(Number<c_offset>{}));
 
-                // MFMA accumulation A * Up
-                xdlops_gemm.template Run<ik_minor * MXdlPack + im_minor,
-                                         ik_minor * NXdlPack + in_minor>(
-                    a_thread_vec.template AsType<mfma_input_type_a>(),
-                    a_scale_thread_vec.template AsType<mfma_scale_input_type_a>(),
-                    b_thread_vec_up.template AsType<mfma_input_type_b>(),
-                    b_scale_thread_vec_up.template AsType<mfma_scale_input_type_b>(),
-                    c_thread_buf_up.GetVectorTypeReference(Number<c_offset>{}));
+                    // MFMA accumulation A * Up
+                    xdlops_gemm.template Run<ik_minor * MXdlPack + im_minor,
+                                             ik_minor * NXdlPack + in_minor>(
+                        a_thread_vec.template AsType<mfma_input_type_a>(),
+                        a_scale_thread_vec.template AsType<mfma_scale_input_type_a>(),
+                        b_thread_vec_up.template AsType<mfma_input_type_b>(),
+                        b_scale_thread_vec_up.template AsType<mfma_scale_input_type_b>(),
+                        c_thread_buf_up.GetVectorTypeReference(Number<c_offset>{}));
+                }
 
                 if constexpr(MPerBlock == 64 && k0.value == 0 && n0.value == 0)
                 {
@@ -757,7 +782,11 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                     Number<BStageDoubleBuffer ? (stage.value + 1) % 2 : 0>{};
                 constexpr bool is_last = stage.value == (KStageRepeat - 1);
 
-                if constexpr(BStageDoubleBuffer)
+                if constexpr(ProbeHoistLoads)
+                {
+                    // Compute floor: operands stay as the prologue left them.
+                }
+                else if constexpr(BStageDoubleBuffer)
                 {
                     if constexpr(!is_last || load_after_last.value != 0)
                     {
@@ -782,7 +811,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                             __builtin_amdgcn_s_waitcnt(async_vmcnt_encoding);
                             block_sync_lds();
                         }
-                        if constexpr(do_global_copy.value != 0)
+                        if constexpr(do_global_copy.value != 0 && !ProbeHoistLoads)
                         {
                             a_blockwise_copy.Run(
                                 a_grid_desc, a_grid_buf, a_block_desc, a_block_bufs(comp_lds));
@@ -808,6 +837,12 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                         read_a_stage(m_major, im_minor, Number<0>{}, a_block_bufs(mem_lds));
                     }
                 });
+
+                if constexpr(ProbeDoubleBarrier)
+                {
+                    // Barrier cost slope: one extra rendezvous per stage pass, nothing else changed.
+                    block_sync_lds();
+                }
 
                 if constexpr(MPerBlock >= 64)
                 {
@@ -875,6 +910,15 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
         else if constexpr(TailNum == TailNumber::Odd)
         {
             tile_pass(I0, I1, Number<0>{}, Number<0>{}, Number<0>{}, Number<0>{});
+        }
+
+        if constexpr(ProbeSkipMfma)
+        {
+            // Data-dependent use of the sink: keeps the loads alive without adding real work.
+            if(probe_sink == 0x7f7f7f7f)
+            {
+                c_thread_buf.Clear();
+            }
         }
     }
 
