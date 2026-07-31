@@ -182,7 +182,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
     // ping-pong above); 2 keeps two, doubling outstanding VMEM at the cost of 2 more stage buffers.
     // With depth 2 the buffers are indexed [tile parity][stage], so a pass loads the same stage of
     // the next tile.
-    static constexpr index_t BStageBufDepth = 2;
+    static constexpr index_t BStageBufDepth = 1;
     static constexpr index_t BStageBufCount = BStageBufDepth * KStageRepeat;
 
     // Diagnostic probes. Each one produces deliberately wrong results and exists only to partition
