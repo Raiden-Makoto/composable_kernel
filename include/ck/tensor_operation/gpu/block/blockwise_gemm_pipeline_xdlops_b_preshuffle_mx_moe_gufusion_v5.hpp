@@ -183,8 +183,8 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
     // ProbeSkipMfma:    keep every load and barrier, drop the MFMAs -> streaming floor.
     // ProbeHoistLoads:  keep every MFMA and barrier, load operands once -> compute floor.
     // ProbeDoubleBarrier: one extra block barrier per stage pass -> barrier cost slope.
-    static constexpr bool ProbeSkipMfma       = true;
-    static constexpr bool ProbeHoistLoads     = false;
+    static constexpr bool ProbeSkipMfma       = false;
+    static constexpr bool ProbeHoistLoads     = true;
     static constexpr bool ProbeDoubleBarrier  = false;
 
     // Only one stage worth of B and scale loads is in flight during the prologue.
