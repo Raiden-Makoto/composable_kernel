@@ -722,20 +722,15 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                     // Opaque consumer for every operand the MFMAs would have read. Empty asm emits
                     // no instructions but forces each full vector into registers, so neither the
                     // loads nor their vector width can be optimized away.
-                    constexpr auto num_a_chunks =
-                        KPack / (xdlops_gemm.K1PerXdlops / APackedSize);
-                    constexpr auto num_b_chunks =
-                        KPack / (xdlops_gemm.K1PerXdlops / BPackedSize);
-                    static_for<0, num_a_chunks, 1>{}([&](auto c) {
-                        asm volatile(
-                            "" ::"v"(a_thread_vec.template AsType<mfma_input_type_a>()[c]));
-                    });
-                    static_for<0, num_b_chunks, 1>{}([&](auto c) {
-                        asm volatile(
-                            "" ::"v"(b_thread_vec.template AsType<mfma_input_type_b>()[c]));
-                        asm volatile(
-                            "" ::"v"(b_thread_vec_up.template AsType<mfma_input_type_b>()[c]));
-                    });
+                    static_assert(KPack / (xdlops_gemm.K1PerXdlops / APackedSize) == 1 &&
+                                      KPack / (xdlops_gemm.K1PerXdlops / BPackedSize) == 1,
+                                  "probe sink assumes one mfma chunk per fragment");
+                    asm volatile(
+                        "" ::"v"(a_thread_vec.template AsType<mfma_input_type_a>()[Number<0>{}]));
+                    asm volatile(
+                        "" ::"v"(b_thread_vec.template AsType<mfma_input_type_b>()[Number<0>{}]));
+                    asm volatile("" ::"v"(
+                        b_thread_vec_up.template AsType<mfma_input_type_b>()[Number<0>{}]));
                     asm volatile("" ::"v"(
                         a_scale_thread_vec.template AsType<mfma_scale_input_type_a>()[Number<0>{}]));
                     asm volatile("" ::"v"(
