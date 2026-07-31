@@ -178,6 +178,13 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
     // is bound by B read latency, not by wave count.
     static constexpr bool BStageDoubleBuffer = true;
 
+    // How many K stages ahead the B/scale operands are fetched. 1 keeps one stage in flight (the
+    // ping-pong above); 2 keeps two, doubling outstanding VMEM at the cost of 2 more stage buffers.
+    // With depth 2 the buffers are indexed [tile parity][stage], so a pass loads the same stage of
+    // the next tile.
+    static constexpr index_t BStageBufDepth = 2;
+    static constexpr index_t BStageBufCount = BStageBufDepth * KStageRepeat;
+
     // Diagnostic probes. Each one produces deliberately wrong results and exists only to partition
     // the runtime; all three must be false for a usable kernel.
     // ProbeSkipMfma:    keep every load and barrier, drop the MFMAs -> streaming floor.
@@ -185,7 +192,7 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
     // ProbeDoubleBarrier: one extra block barrier per stage pass -> barrier cost slope.
     static constexpr bool ProbeSkipMfma       = false;
     static constexpr bool ProbeHoistLoads     = false;
-    static constexpr bool ProbeDoubleBarrier  = true;
+    static constexpr bool ProbeDoubleBarrier  = false;
 
     // Only one stage worth of B and scale loads is in flight during the prologue.
     static constexpr auto stage_vmcnt = async_vmcnt / KStageRepeat;
@@ -507,8 +514,8 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                                   true>
             b_thread_buf_up;
 
-        StaticallyIndexedArray<decltype(b_thread_buf), Number<2>{}> b_thread_bufs;
-        StaticallyIndexedArray<decltype(b_thread_buf_up), Number<2>{}> b_thread_bufs_up;
+        StaticallyIndexedArray<decltype(b_thread_buf), Number<BStageBufCount>{}> b_thread_bufs;
+        StaticallyIndexedArray<decltype(b_thread_buf_up), Number<BStageBufCount>{}> b_thread_bufs_up;
 
         auto b_block_offset = b_blockwise_copy.GetSrcOffset();
         const auto b_block_n_stride =
@@ -560,9 +567,9 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
         auto b_scale_thread_buf_up = make_static_buffer<AddressSpaceEnum::Vgpr, BScaleDataType>(
             b_scale_thread_desc_stage_.GetElementSpaceSize());
 
-        StaticallyIndexedArray<decltype(a_scale_thread_buf), Number<2>{}> a_scale_thread_bufs;
-        StaticallyIndexedArray<decltype(b_scale_thread_buf), Number<2>{}> b_scale_thread_bufs;
-        StaticallyIndexedArray<decltype(b_scale_thread_buf_up), Number<2>{}> b_scale_thread_bufs_up;
+        StaticallyIndexedArray<decltype(a_scale_thread_buf), Number<BStageBufCount>{}> a_scale_thread_bufs;
+        StaticallyIndexedArray<decltype(b_scale_thread_buf), Number<BStageBufCount>{}> b_scale_thread_bufs;
+        StaticallyIndexedArray<decltype(b_scale_thread_buf_up), Number<BStageBufCount>{}> b_scale_thread_bufs_up;
 
         auto a_scale_block_offset = a_scale_thread_copy.GetSrcOffset();
         auto b_scale_block_offset = b_scale_thread_copy.GetSrcOffset();
@@ -805,14 +812,31 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
             ignore = load_after_last;
 
             static_for<0, KStageRepeat, 1>{}([&](auto stage) {
-                constexpr auto cur_buf = Number<BStageDoubleBuffer ? stage.value % 2 : 0>{};
+                // Depth 2 indexes the stage buffers as [tile parity][stage] so a pass fetches the
+                // same stage of the next tile, two stages ahead of its own consumption.
+                constexpr auto cur_buf =
+                    Number<BStageBufDepth == 2
+                               ? comp_lds.value * KStageRepeat + stage.value
+                               : (BStageDoubleBuffer ? stage.value % 2 : 0)>{};
                 constexpr auto nxt_buf =
-                    Number<BStageDoubleBuffer ? (stage.value + 1) % 2 : 0>{};
+                    Number<BStageBufDepth == 2
+                               ? (1 - comp_lds.value) * KStageRepeat + stage.value
+                               : (BStageDoubleBuffer ? (stage.value + 1) % 2 : 0)>{};
                 constexpr bool is_last = stage.value == (KStageRepeat - 1);
 
                 if constexpr(ProbeHoistLoads)
                 {
                     // Compute floor: operands stay as the prologue left them.
+                }
+                else if constexpr(BStageBufDepth == 2)
+                {
+                    // load_after_last doubles as "this pass issues loads at all": the final tile
+                    // must not fetch past the end of K.
+                    if constexpr(load_after_last.value != 0)
+                    {
+                        load_b_stage(nxt_buf);
+                        load_scale_stage(nxt_buf);
+                    }
                 }
                 else if constexpr(BStageDoubleBuffer)
                 {
@@ -882,20 +906,31 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
 
         // Global prefetch 1
         a_blockwise_copy.Run(a_grid_desc, a_grid_buf, a_block_desc, a_block_bufs(I0));
-        if constexpr(BStageDoubleBuffer)
+        if constexpr(BStageBufDepth == 2)
+        {
+            // Two stages ahead: the first tile's own stages both come from the prologue.
+            load_b_stage(I0);
+            load_scale_stage(I0);
+            load_b_stage(I1);
+            load_scale_stage(I1);
+        }
+        else if constexpr(BStageDoubleBuffer)
         {
             load_b_stage(I0);
         }
 
         a_blockwise_copy.MoveSrcSliceWindow(a_grid_desc, a_block_copy_step);
 
-        if constexpr(BStageDoubleBuffer)
+        if constexpr(BStageBufDepth != 2 && BStageDoubleBuffer)
         {
             load_scale_stage(I0);
         }
 
-        // Local prefetch 1, sync the async load
-        __builtin_amdgcn_s_waitcnt(BStageDoubleBuffer ? stage_vmcnt_encoding : 3952);
+        // Local prefetch 1, sync the async load. Depth 2 has a full tile of loads outstanding
+        // instead of a single stage, so it waits on the tile-sized count.
+        __builtin_amdgcn_s_waitcnt(BStageBufDepth == 2
+                                       ? async_vmcnt_encoding
+                                       : (BStageDoubleBuffer ? stage_vmcnt_encoding : 3952));
         block_sync_lds();
         static_for<0, LocalPrefetchStages, 1>{}([&](auto m0) {
             read_a_stage(Number<(m0 / MXdlPack) % (MRepeat / MXdlPack)>{},
