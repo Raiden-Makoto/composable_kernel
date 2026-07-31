@@ -725,18 +725,35 @@ struct BlockwiseGemmXdlops_pipeline_bpreshuffle_mx_moe_gufusion_v5<
                     static_assert(KPack / (xdlops_gemm.K1PerXdlops / APackedSize) == 1 &&
                                       KPack / (xdlops_gemm.K1PerXdlops / BPackedSize) == 1,
                                   "probe sink assumes one mfma chunk per fragment");
-                    asm volatile(
-                        "" ::"v"(a_thread_vec.template AsType<mfma_input_type_a>()[Number<0>{}]));
-                    asm volatile(
-                        "" ::"v"(b_thread_vec.template AsType<mfma_input_type_b>()[Number<0>{}]));
-                    asm volatile("" ::"v"(
-                        b_thread_vec_up.template AsType<mfma_input_type_b>()[Number<0>{}]));
-                    asm volatile("" ::"v"(
-                        a_scale_thread_vec.template AsType<mfma_scale_input_type_a>()[Number<0>{}]));
-                    asm volatile("" ::"v"(
-                        b_scale_thread_vec.template AsType<mfma_scale_input_type_b>()[Number<0>{}]));
-                    asm volatile("" ::"v"(b_scale_thread_vec_up
-                                              .template AsType<mfma_scale_input_type_b>()[Number<0>{}]));
+
+                    using ProbeVec4 = typename vector_type<int32_t, 4>::type;
+                    const auto a_bits = bit_cast<ProbeVec4>(
+                        a_thread_vec.template AsType<mfma_input_type_a>()[Number<0>{}]);
+                    const auto b_bits = bit_cast<ProbeVec4>(
+                        b_thread_vec.template AsType<mfma_input_type_b>()[Number<0>{}]);
+                    const auto u_bits = bit_cast<ProbeVec4>(
+                        b_thread_vec_up.template AsType<mfma_input_type_b>()[Number<0>{}]);
+                    asm volatile("" ::"v"(a_bits[0]),
+                                 "v"(a_bits[1]),
+                                 "v"(a_bits[2]),
+                                 "v"(a_bits[3]),
+                                 "v"(b_bits[0]),
+                                 "v"(b_bits[1]),
+                                 "v"(b_bits[2]),
+                                 "v"(b_bits[3]),
+                                 "v"(u_bits[0]),
+                                 "v"(u_bits[1]),
+                                 "v"(u_bits[2]),
+                                 "v"(u_bits[3]));
+
+                    const int32_t as_bits = bit_cast<int32_t>(
+                        a_scale_thread_vec.template AsType<mfma_scale_input_type_a>()[Number<0>{}]);
+                    const int32_t bs_bits = bit_cast<int32_t>(
+                        b_scale_thread_vec.template AsType<mfma_scale_input_type_b>()[Number<0>{}]);
+                    const int32_t us_bits = bit_cast<int32_t>(
+                        b_scale_thread_vec_up
+                            .template AsType<mfma_scale_input_type_b>()[Number<0>{}]);
+                    asm volatile("" ::"v"(as_bits), "v"(bs_bits), "v"(us_bits));
                 }
                 else
                 {
